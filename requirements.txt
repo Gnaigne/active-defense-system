@@ -1,0 +1,17 @@
+# ============================================================================
+# requirements.txt - Dependency danh sách thư viện Python
+# ============================================================================
+# Cài đặt: pip install -r requirements.txt
+# ============================================================================
+
+# Rich — Console output đẹp mắt (bảng, màu sắc, panel, progress bar)
+# https://github.com/Textualize/rich
+rich>=13.0.0
+
+# Requests — HTTP client để gọi Discord Webhook API
+# https://github.com/psf/requests
+requests>=2.31.0
+
+# python-dotenv — Load biến môi trường từ file .env
+# https://github.com/theskumar/python-dotenv
+python-dotenv>=1.0.0

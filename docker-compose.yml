@@ -1,0 +1,70 @@
+# ============================================================================
+# docker-compose.yml — Orchestration cho Active Defense Lab
+# ============================================================================
+# Tạo mạng ảo gồm 2 container:
+#   1. victim-server    : Máy chủ nạn nhân (Nginx + SSH + defender.py)
+#   2. attacker-machine : Máy kẻ tấn công (hydra + curl + ab)
+#
+# Cách chạy:
+#   docker-compose up --build -d       # Build & khởi chạy ngầm
+#   docker-compose logs -f victim      # Xem log defender.py
+#   docker exec -it attacker bash      # "Chui" vào máy attacker
+#   docker-compose down                # Tắt toàn bộ
+# ============================================================================
+
+services:
+  # ======================== VICTIM SERVER =================================
+  victim:
+    build:
+      context: .                          # Build context = thư mục gốc project
+      dockerfile: docker/victim/Dockerfile
+    container_name: victim-server
+    hostname: victim-server
+
+    # Cấp quyền để chạy iptables bên trong container
+    # NET_ADMIN: quản lý network (iptables)
+    # NET_RAW: raw socket (ping, etc.)
+    cap_add:
+      - NET_ADMIN
+      - NET_RAW
+
+    # Mở port ra host để debug từ bên ngoài (tùy chọn)
+    ports:
+      - "2222:22"    # SSH: truy cập từ host qua port 2222
+      - "8080:80"    # HTTP: truy cập từ host qua port 8080
+
+    networks:
+      defense-net:
+        ipv4_address: 172.20.0.10    # IP tĩnh cho victim
+
+    # Restart tự động nếu container crash
+    restart: unless-stopped
+
+  # ======================== ATTACKER MACHINE ================================
+  attacker:
+    build:
+      context: .
+      dockerfile: docker/attacker/Dockerfile
+    container_name: attacker-machine
+    hostname: attacker-machine
+
+    # Phụ thuộc: chờ victim khởi chạy trước
+    depends_on:
+      - victim
+
+    networks:
+      defense-net:
+        ipv4_address: 172.20.0.20    # IP tĩnh cho attacker
+
+    # Giữ container chạy (stdin_open + tty = docker run -it)
+    stdin_open: true
+    tty: true
+
+# ======================== NETWORK ==========================================
+# Mạng nội bộ riêng cho lab, cách ly với mạng host
+networks:
+  defense-net:
+    driver: bridge
+    ipam:
+      config:
+        - subnet: 172.20.0.0/16     # Dải mạng nội bộ
