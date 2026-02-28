@@ -19,35 +19,41 @@ Không cần cài Python, Nginx, hay bất kỳ phần mềm nào khác — Dock
 
 ---
 
-## 🚀 Cài đặt (Installation)
+## 🚀 Cài đặt & Khởi chạy
 
-### 1. Clone source code
+### ⭐ Cách tối ưu: GitHub Codespaces (Khuyến nghị)
 
-```bash
-git clone <REPO_URL>
-cd active-defense-system
-```
+Không cần cài bất kỳ phần mềm nào. Chỉ cần trình duyệt:
 
-### 2. Cấu hình môi trường
-
-```bash
-cp .env.example .env
-```
-
-> ✅ **File `.env.example` đã được cấu hình sẵn** (bao gồm Discord Webhook URL). Không cần chỉnh sửa gì thêm.
->
-> 💬 Cảnh báo sẽ được gửi đến Discord server của dự án. Join tại link này: https://discord.gg/YDSPtmUhw5 (Vào channel security_alerts) để xem alert real-time.
-
-### 3. Khởi chạy hệ thống
+1. Vào repo trên GitHub → nhấn nút **"Code"** → **"Codespaces"** → **"Create codespace on main"**
+2. Đợi ~2 phút để Codespaces khởi tạo môi trường (Linux + Docker tự có sẵn)
+3. Trong terminal Codespaces, chạy:
 
 ```bash
 docker compose up --build -d
 ```
 
-| Flag | Ý nghĩa |
-|------|---------|
-| `--build` | Đóng gói lại mã nguồn mới nhất vào container |
-| `-d` | Chạy ngầm (detached) — không chiếm terminal |
+4. Xong! Hệ thống đã chạy. Chuyển sang mục **Kịch bản Demo** bên dưới để test.
+
+> 💡 **Lưu ý:** Sau khi test xong, vào https://github.com/codespaces → nhấn `...` → **Stop codespace** để không bị tính giờ (mỗi account GitHub Free có 60h/tháng, dư sức test).
+
+---
+
+### 🐧 Cách khác: Chạy trên máy local
+
+**Linux:** Cài Docker + Git → clone repo → chạy `docker compose up --build -d`.
+
+**Windows:** Cần bật ảo hóa phần cứng (Virtualization) trong BIOS, sau đó cài [Docker Desktop](https://docs.docker.com/desktop/setup/install/windows-install/) (sẽ tự cài WSL2). Rồi chạy tương tự.
+
+```bash
+git clone <REPO_URL>
+cd active-defense-system
+docker compose up --build -d
+```
+
+> ✅ **File `.env` đã có sẵn trong repo** (bao gồm Discord Webhook URL). Không cần cấu hình gì thêm.
+>
+> 💬 Cảnh báo sẽ được gửi đến Discord server của dự án. [Join tại đây](https://discord.gg/YDSPtmUhw5) (vào channel **#security-alerts**) để xem alert real-time.
 
 Hệ thống sẽ tạo 2 container:
 
@@ -56,14 +62,14 @@ Hệ thống sẽ tạo 2 container:
 | `victim-server` | 172.20.0.10 | Máy chủ nạn nhân (Nginx + SSH + defender.py + iptables) |
 | `attacker-machine` | 172.20.0.20 | Máy tấn công (hydra, curl, ab) |
 
-### 4. Kiểm tra trạng thái
+Kiểm tra trạng thái:
 
 ```bash
 docker ps                           # Xem container đang chạy
 docker logs victim-server            # Xem log defender.py
 ```
 
-### 5. Tắt hệ thống
+Tắt hệ thống:
 
 ```bash
 docker compose down
@@ -93,7 +99,7 @@ chmod +x run_test.sh
 ./run_test.sh all
 ```
 
-> ⚠️ Script cần `sudo` vì Docker yêu cầu quyền root.
+> 💡 Trên Codespaces không cần `sudo`. Trên máy local có thể cần thêm `sudo` trước lệnh.
 
 ---
 
@@ -104,20 +110,20 @@ Mở **3 terminal** riêng biệt:
 #### Terminal 1 — Xem log defender real-time trên victim
 
 ```bash
-sudo docker exec -it victim-server bash
+docker exec -it victim-server bash
 tail -f /var/log/auth.log /var/log/nginx/access.log
 ```
 
 #### Terminal 2 — Chui vào máy attacker
 
 ```bash
-sudo docker exec -it attacker-machine bash
+docker exec -it attacker-machine bash
 ```
 
 #### Terminal 3 — Dùng để restart victim khi IP bị block
 
 ```bash
-sudo docker restart victim-server
+docker restart victim-server
 ```
 
 > ⚠️ **Lưu ý quan trọng:** Sau mỗi lần tấn công bị phát hiện, defender sẽ block IP attacker. Để test tiếp loại khác, phải restart victim bằng Terminal 3 để reset iptables.
