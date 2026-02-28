@@ -29,8 +29,9 @@ services:
       - NET_RAW
 
     # Mở port ra host để debug từ bên ngoài (tùy chọn)
+    # Lưu ý: port 2222 có thể bị chiếm trên Codespaces, dùng 2200 thay thế
     ports:
-      - "2222:22"    # SSH: truy cập từ host qua port 2222
+      - "2200:22"    # SSH: truy cập từ host qua port 2200
       - "8080:80"    # HTTP: truy cập từ host qua port 8080
 
     networks:
