@@ -14,7 +14,8 @@
 import time
 import threading
 from queue import Queue, Empty
-from collections import defaultdict
+from collections import defaultdict, deque
+from urllib.parse import unquote
 from rich.console import Console
 from rich.table import Table
 
@@ -67,18 +68,21 @@ class AttackDetector:
         self.log_queue = log_queue
         self.on_attack = on_attack_callback
 
+        # --- Lock bảo vệ shared state (thread safety) ---
+        self._lock = threading.Lock()
+
         # --- Bộ đếm SSH failed login theo IP ---
-        # Key: IP address, Value: list các timestamp login thất bại
-        # defaultdict tự tạo list rỗng cho IP mới, không cần kiểm tra key
-        self._ssh_attempts = defaultdict(list)
+        # Key: IP address, Value: deque các timestamp login thất bại
+        # deque hiệu quả hơn list cho sliding window (append/popleft O(1))
+        self._ssh_attempts: dict[str, deque] = defaultdict(deque)
 
         # --- Bộ đếm HTTP request theo IP ---
         # Tương tự ssh_attempts nhưng cho HTTP request
-        self._http_requests = defaultdict(list)
+        self._http_requests: dict[str, deque] = defaultdict(deque)
 
         # --- Tập hợp IP đã bị block ---
         # Dùng set để lookup O(1) và tránh gửi lệnh iptables trùng lặp
-        self._blocked_ips = set()
+        self._blocked_ips: set[str] = set()
 
         # --- Thread control ---
         self._stop_event = threading.Event()
@@ -90,6 +94,10 @@ class AttackDetector:
             "attacks_detected": 0,
             "ips_blocked": 0,
         }
+
+        # --- Thời điểm cleanup cuối cùng ---
+        self._last_cleanup = time.monotonic()
+        self._CLEANUP_INTERVAL = 300  # Dọn dẹp IP cũ mỗi 5 phút
 
     def start(self):
         """
@@ -127,13 +135,17 @@ class AttackDetector:
                 # Lấy dòng log từ queue, timeout 0.5s
                 # Nếu queue rỗng quá 0.5s → ném Empty exception → tiếp tục loop
                 log_type, line = self.log_queue.get(timeout=0.5)
-                self.stats["lines_processed"] += 1
+                with self._lock:
+                    self.stats["lines_processed"] += 1
 
                 # Phân loại và xử lý dòng log theo loại
                 if log_type == "auth":
                     self._analyze_auth_log(line)
                 elif log_type == "nginx":
                     self._analyze_nginx_log(line)
+
+                # Dọn dẹp định kỳ IP cũ để tránh memory leak
+                self._periodic_cleanup()
 
             except Empty:
                 # Queue rỗng, không có log mới → quay lại kiểm tra stop_event
@@ -171,18 +183,17 @@ class AttackDetector:
 
         now = time.time()
 
-        # Thêm timestamp hiện tại vào danh sách attempts của IP
+        # Thêm timestamp hiện tại vào deque attempts của IP
         self._ssh_attempts[ip].append(now)
 
-        # Sliding Window: chỉ giữ lại các attempt trong cửa sổ thời gian
-        # Loại bỏ tất cả attempt cũ hơn (now - WINDOW) giây
+        # Sliding Window: loại bỏ timestamp cũ từ đầu deque (O(1) mỗi lần pop)
         cutoff = now - SSH_BRUTE_FORCE_WINDOW
-        self._ssh_attempts[ip] = [
-            t for t in self._ssh_attempts[ip] if t > cutoff
-        ]
+        attempts = self._ssh_attempts[ip]
+        while attempts and attempts[0] <= cutoff:
+            attempts.popleft()
 
         # Đếm số lần thất bại trong cửa sổ
-        attempt_count = len(self._ssh_attempts[ip])
+        attempt_count = len(attempts)
 
         # Log từng lần thất bại để debug
         console.print(
@@ -235,7 +246,6 @@ class AttackDetector:
 
         # --- Kiểm tra 2: SQL Injection ---
         # Decode URL path trước khi check (attacker thường encode payload)
-        from urllib.parse import unquote
         decoded_path = unquote(path)
 
         if SQLI_PATTERNS.search(decoded_path):
@@ -263,13 +273,13 @@ class AttackDetector:
         now = time.time()
         self._http_requests[ip].append(now)
 
-        # Loại bỏ request cũ ngoài cửa sổ thời gian
+        # Sliding Window: loại bỏ timestamp cũ từ đầu deque (O(1) mỗi lần pop)
         cutoff = now - HTTP_FLOOD_WINDOW
-        self._http_requests[ip] = [
-            t for t in self._http_requests[ip] if t > cutoff
-        ]
+        requests_dq = self._http_requests[ip]
+        while requests_dq and requests_dq[0] <= cutoff:
+            requests_dq.popleft()
 
-        request_count = len(self._http_requests[ip])
+        request_count = len(requests_dq)
 
         # Chỉ cảnh báo khi vượt ngưỡng
         if request_count >= HTTP_FLOOD_THRESHOLD:
@@ -297,10 +307,11 @@ class AttackDetector:
             attack_type: Loại tấn công (dùng hằng số từ config).
             log_line: Dòng log gốc gây ra cảnh báo.
         """
-        # Thêm IP vào set đã block
-        self._blocked_ips.add(ip)
-        self.stats["attacks_detected"] += 1
-        self.stats["ips_blocked"] += 1
+        # Cập nhật thống kê (thread-safe)
+        with self._lock:
+            self._blocked_ips.add(ip)
+            self.stats["attacks_detected"] += 1
+            self.stats["ips_blocked"] += 1
 
         # In cảnh báo nổi bật ra console
         console.print()
@@ -314,20 +325,61 @@ class AttackDetector:
         console.print()
 
         # Gọi callback (Firewall block + Discord alert)
+        # Bọc trong try-except để tránh crash detector thread
         if self.on_attack:
-            self.on_attack(ip, attack_type, log_line)
+            try:
+                self.on_attack(ip, attack_type, log_line)
+            except Exception as e:
+                console.print(
+                    f"  [bold red]✗ Lỗi trong callback phòng vệ:[/bold red] {e}"
+                )
+
+    def get_stats(self) -> dict:
+        """Trả về bản copy thread-safe của thống kê."""
+        with self._lock:
+            return self.stats.copy()
 
     def print_stats(self):
         """
         In bảng thống kê hoạt động của detection engine.
         Dùng rich Table để hiển thị đẹp trên console.
         """
+        stats = self.get_stats()
         table = Table(title="📊 Thống kê Detection Engine")
         table.add_column("Metric", style="cyan")
         table.add_column("Value", style="green", justify="right")
-        table.add_row("Dòng log đã xử lý", str(self.stats["lines_processed"]))
-        table.add_row("Tấn công phát hiện", str(self.stats["attacks_detected"]))
-        table.add_row("IP đã block", str(self.stats["ips_blocked"]))
+        table.add_row("Dòng log đã xử lý", str(stats["lines_processed"]))
+        table.add_row("Tấn công phát hiện", str(stats["attacks_detected"]))
+        table.add_row("IP đã block", str(stats["ips_blocked"]))
         table.add_row("IP đang theo dõi (SSH)", str(len(self._ssh_attempts)))
         table.add_row("IP đang theo dõi (HTTP)", str(len(self._http_requests)))
         console.print(table)
+
+    def _periodic_cleanup(self):
+        """
+        Dọn dẹp định kỳ các entry cũ trong sliding window dict.
+        Tránh memory leak khi có nhiều IP unique qua thời gian dài.
+        """
+        now = time.monotonic()
+        if now - self._last_cleanup < self._CLEANUP_INTERVAL:
+            return
+        self._last_cleanup = now
+
+        # Xóa IP đã bị block hoặc không còn attempt nào trong window
+        current_time = time.time()
+
+        ssh_cutoff = current_time - SSH_BRUTE_FORCE_WINDOW
+        stale_ssh = [
+            ip for ip, dq in self._ssh_attempts.items()
+            if not dq or dq[-1] <= ssh_cutoff
+        ]
+        for ip in stale_ssh:
+            del self._ssh_attempts[ip]
+
+        http_cutoff = current_time - HTTP_FLOOD_WINDOW
+        stale_http = [
+            ip for ip, dq in self._http_requests.items()
+            if not dq or dq[-1] <= http_cutoff
+        ]
+        for ip in stale_http:
+            del self._http_requests[ip]

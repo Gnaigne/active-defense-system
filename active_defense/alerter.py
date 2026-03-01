@@ -8,7 +8,9 @@
 # Sử dụng Discord Embed format để hiển thị đẹp và dễ đọc.
 # ============================================================================
 
+import time
 import datetime
+import threading
 import requests
 from rich.console import Console
 
@@ -60,6 +62,16 @@ class DiscordAlerter:
         self.webhook_url = webhook_url or DISCORD_WEBHOOK_URL
         self.enabled = bool(self.webhook_url)
 
+        # Rate limiting: tối đa 4 request mỗi 2 giây (dưới ngưỡng Discord 5/2s)
+        self._rate_lock = threading.Lock()
+        self._send_timestamps: list[float] = []
+        self._RATE_LIMIT = 4
+        self._RATE_WINDOW = 2.0
+
+        # Session để reuse connection (TCP keep-alive, giảm overhead)
+        self._session = requests.Session()
+        self._session.headers.update({"Content-Type": "application/json"})
+
         if not self.enabled:
             console.print(
                 "  [yellow]⚠ Discord Webhook chưa được cấu hình.[/yellow]\n"
@@ -94,6 +106,9 @@ class DiscordAlerter:
         """
         if not self.enabled:
             return
+
+        # Rate limiting: chờ nếu đã gửi quá nhiều request gần đây
+        self._wait_for_rate_limit()
 
         # Lấy thời gian hiện tại theo ISO 8601
         timestamp = datetime.datetime.now(datetime.timezone.utc).isoformat()
@@ -147,11 +162,10 @@ class DiscordAlerter:
 
         # === Gửi HTTP POST đến Discord Webhook ===
         try:
-            response = requests.post(
+            response = self._session.post(
                 self.webhook_url,
                 json=payload,
                 timeout=10,  # Timeout 10s tránh block thread quá lâu
-                headers={"Content-Type": "application/json"},
             )
 
             # Discord trả về 204 No Content khi thành công
@@ -181,3 +195,26 @@ class DiscordAlerter:
             console.print(
                 f"  [red]✗ Lỗi gửi Discord webhook:[/red] {e}"
             )
+
+    def _wait_for_rate_limit(self):
+        """
+        Đảm bảo không vượt rate limit của Discord Webhook.
+        Nếu đã gửi >= _RATE_LIMIT request trong _RATE_WINDOW giây gần nhất,
+        chờ cho đến khi window trối qua.
+        """
+        with self._rate_lock:
+            now = time.monotonic()
+            # Xóa timestamp cũ ngoài window
+            self._send_timestamps = [
+                t for t in self._send_timestamps
+                if now - t < self._RATE_WINDOW
+            ]
+            if len(self._send_timestamps) >= self._RATE_LIMIT:
+                # Cần chờ: tính thời gian còn lại của request cũ nhất
+                sleep_time = self._RATE_WINDOW - (now - self._send_timestamps[0])
+                if sleep_time > 0:
+                    console.print(
+                        f"  [dim]⏳ Rate limit: chờ {sleep_time:.1f}s...[/dim]"
+                    )
+                    time.sleep(sleep_time)
+            self._send_timestamps.append(time.monotonic())

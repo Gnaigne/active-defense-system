@@ -164,6 +164,7 @@ class ActiveDefender:
             dry_run: Nếu True, không thực sự gọi iptables.
         """
         self.dry_run = dry_run
+        self._shutdown = False  # Cờ tránh shutdown 2 lần
 
         # Queue dùng làm kênh giao tiếp giữa Monitor và Detector
         # maxsize=10000 để tránh memory leak nếu Detector xử lý chậm
@@ -238,6 +239,10 @@ class ActiveDefender:
         Dừng Monitor trước (ngừng đọc log), sau đó dừng Detector.
         In thống kê trước khi thoát.
         """
+        if self._shutdown:
+            return  # Tránh shutdown lặp
+        self._shutdown = True
+
         console.print("\n[bold yellow]⏹ Đang tắt hệ thống...[/bold yellow]")
         self.monitor.stop()
         self.detector.stop()
@@ -268,8 +273,9 @@ class ActiveDefender:
             while True:
                 time.sleep(30)
                 iteration += 1
-                lines = self.detector.stats["lines_processed"]
-                attacks = self.detector.stats["attacks_detected"]
+                stats = self.detector.get_stats()
+                lines = stats["lines_processed"]
+                attacks = stats["attacks_detected"]
                 blocked = self.firewall.get_blocked_count()
                 console.print(
                     f"  [dim]💓 Heartbeat #{iteration}: "

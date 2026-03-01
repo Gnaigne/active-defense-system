@@ -9,7 +9,7 @@
 import os
 import time
 import threading
-from queue import Queue
+from queue import Queue, Full
 from rich.console import Console
 
 from active_defense.config import AUTH_LOG, NGINX_LOG, POLL_INTERVAL
@@ -126,6 +126,12 @@ class LogMonitor:
                     f"file, bắt đầu theo dõi log mới..."
                 )
 
+                # Lưu inode ban đầu để detect file rotation (logrotate thay file mới)
+                try:
+                    current_inode = os.stat(file_path).st_ino
+                except OSError:
+                    current_inode = None
+
                 while not self._stop_event.is_set():
                     line = f.readline()
 
@@ -133,7 +139,11 @@ class LogMonitor:
                         # Có dòng log mới → đóng gói và đẩy vào queue
                         stripped = line.strip()
                         if stripped:  # Bỏ qua dòng trống
-                            self.log_queue.put((log_type, stripped))
+                            try:
+                                self.log_queue.put_nowait((log_type, stripped))
+                            except Full:
+                                # Queue đầy — bỏ dòng log này để không block monitor
+                                pass
                     else:
                         # Không có dòng mới → kiểm tra file rotation
                         try:
@@ -144,15 +154,30 @@ class LogMonitor:
                                 # File đã bị truncate (logrotate) → quay về đầu
                                 console.print(
                                     f"  [yellow]↻[/yellow] [dim]{log_type}[/dim]: "
-                                    f"File rotation detected, resetting position..."
+                                    f"File truncated, resetting position..."
                                 )
                                 f.seek(0)
+
+                            # Kiểm tra inode: nếu file đã bị thay thế (logrotate
+                            # move + create new), cần mở lại file mới
+                            new_inode = os.stat(file_path).st_ino
+                            if current_inode is not None and new_inode != current_inode:
+                                console.print(
+                                    f"  [yellow]↻[/yellow] [dim]{log_type}[/dim]: "
+                                    f"File replaced (inode changed), reopening..."
+                                )
+                                break  # Thoát khỏi with block để mở lại file
+
                         except OSError:
-                            # File bị xóa/thay thế → thoát và để main restart
-                            pass
+                            # File bị xóa/thay thế → thoát và để vòng ngoài mở lại
+                            break
 
                         # Nghỉ ngắn để tránh busy-waiting (tiết kiệm CPU)
                         time.sleep(POLL_INTERVAL)
+
+            # Nếu thoát do file rotation, đệ quy gọi lại để mở file mới
+            if not self._stop_event.is_set():
+                self._tail_file(log_type, file_path)
 
         except PermissionError:
             console.print(

@@ -12,6 +12,8 @@
 
 import re
 import subprocess
+import threading
+from ipaddress import IPv4Address, AddressValueError
 from rich.console import Console
 
 from active_defense.config import WHITELISTED_IPS
@@ -48,7 +50,8 @@ class Firewall:
             dry_run: Nếu True, chỉ mô phỏng (không thực sự gọi iptables).
                      Hữu ích khi test trên máy không có quyền root.
         """
-        self._blocked_ips = set()
+        self._blocked_ips: set[str] = set()
+        self._lock = threading.Lock()
         self.dry_run = dry_run
 
         if dry_run:
@@ -74,8 +77,10 @@ class Firewall:
             True nếu block thành công, False nếu thất bại hoặc bị bỏ qua.
         """
         # === Bước 1: Validate IP ===
-        # Phòng chống command injection: chỉ chấp nhận IP dạng x.x.x.x
-        if not IP_VALIDATE_PATTERN.match(ip):
+        # Phòng chống command injection và validate octet 0-255
+        try:
+            IPv4Address(ip)
+        except (AddressValueError, ValueError):
             console.print(
                 f"  [red]✗ IP không hợp lệ:[/red] '{ip}' — bỏ qua để tránh "
                 f"command injection."
@@ -90,11 +95,12 @@ class Firewall:
             return False
 
         # === Bước 3: Kiểm tra trùng lặp ===
-        if ip in self._blocked_ips:
-            console.print(
-                f"  [dim]↳ IP {ip} đã được block trước đó — bỏ qua.[/dim]"
-            )
-            return False
+        with self._lock:
+            if ip in self._blocked_ips:
+                console.print(
+                    f"  [dim]↳ IP {ip} đã được block trước đó — bỏ qua.[/dim]"
+                )
+                return False
 
         # === Bước 4: Thực thi iptables ===
         command = ["iptables", "-A", "INPUT", "-s", ip, "-j", "DROP"]
@@ -104,7 +110,8 @@ class Firewall:
             console.print(
                 f"  [blue]🔒 DRY-RUN:[/blue] {' '.join(command)}"
             )
-            self._blocked_ips.add(ip)
+            with self._lock:
+                self._blocked_ips.add(ip)
             return True
 
         try:
@@ -119,7 +126,8 @@ class Firewall:
                 text=True,
                 timeout=10,
             )
-            self._blocked_ips.add(ip)
+            with self._lock:
+                self._blocked_ips.add(ip)
             console.print(
                 f"  [bold green]🔒 ĐÃ BLOCK:[/bold green] {ip} "
                 f"(iptables -A INPUT -s {ip} -j DROP)"
@@ -175,14 +183,16 @@ class Firewall:
 
         if self.dry_run:
             console.print(f"  [blue]🔓 DRY-RUN:[/blue] {' '.join(command)}")
-            self._blocked_ips.discard(ip)
+            with self._lock:
+                self._blocked_ips.discard(ip)
             return True
 
         try:
             subprocess.run(
                 command, check=True, capture_output=True, text=True, timeout=10
             )
-            self._blocked_ips.discard(ip)
+            with self._lock:
+                self._blocked_ips.discard(ip)
             console.print(f"  [green]🔓 ĐÃ UNBLOCK:[/green] {ip}")
             return True
 
@@ -198,9 +208,11 @@ class Firewall:
             return False
 
     def get_blocked_ips(self) -> set:
-        """Trả về tập hợp IP đã bị block."""
-        return self._blocked_ips.copy()
+        """Trả về tập hợp IP đã bị block (thread-safe copy)."""
+        with self._lock:
+            return self._blocked_ips.copy()
 
     def get_blocked_count(self) -> int:
-        """Trả về số lượng IP đã bị block."""
-        return len(self._blocked_ips)
+        """Trả về số lượng IP đã bị block (thread-safe)."""
+        with self._lock:
+            return len(self._blocked_ips)
